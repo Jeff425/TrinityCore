@@ -19,13 +19,15 @@
 #include "ScriptedCreature.h"
 #include "naxxramas.h"
 
+
 enum Spells
 {
     SPELL_MORTAL_WOUND      = 25646,
     SPELL_ENRAGE            = 28371,
     SPELL_DECIMATE          = 28374,
     SPELL_BERSERK           = 26662,
-    SPELL_INFECTED_WOUND    = 29306
+    SPELL_INFECTED_WOUND    = 29306,
+    SPELL_INFECTED_AURA     = 29307,
 };
 
 enum Creatures
@@ -47,9 +49,12 @@ enum Events
     EVENT_DECIMATE,
     EVENT_BERSERK,
     EVENT_SUMMON,
+    EVENT_EATEN,
 };
 
-#define EMOTE_NEARBY    " spots a nearby zombie to devour!"
+#define EMOTE_NEARBY    "Gluth spots a nearby zombie to devour!"
+#define EMOTE_DECIMATE  "Gluth decimates all nearby flesh!"
+#define EMOTE_ENRAGE    "Gluth becomes enraged!"
 
 class boss_gluth : public CreatureScript
 {
@@ -67,18 +72,58 @@ public:
         {
             // Do not let Gluth be affected by zombies' debuff
             me->ApplySpellImmune(0, IMMUNITY_ID, SPELL_INFECTED_WOUND, true);
+            
         }
 
         void MoveInLineOfSight(Unit* who) override
         {
-            if (who->GetEntry() == NPC_ZOMBIE && me->IsWithinDistInMap(who, 7))
+            if (who->GetEntry() == NPC_ZOMBIE && me->IsWithinDistInMap(who, 10))
             {
                 SetGazeOn(who);
                 /// @todo use a script text
                 me->TextEmote(EMOTE_NEARBY, nullptr, true);
+                AttackGluth(who->ToCreature());
+                me->SetFacingToObject(who);
+                me->GetMotionMaster()->MoveChase(who);
             }
             else
                 BossAI::MoveInLineOfSight(who);
+        }
+
+        void AttackGluth(Creature* who)
+        {
+            who->SetReactState(REACT_PASSIVE);
+            who->AddThreat(me, 9999999);
+            who->AI()->AttackStart(me);
+            who->ApplySpellImmune(0, IMMUNITY_STATE, SPELL_AURA_MOD_TAUNT, true);
+            who->ApplySpellImmune(0, IMMUNITY_EFFECT, SPELL_EFFECT_ATTACK_ME, true);
+        }
+
+        void AttackGluthDec(ObjectGuid id)
+        {
+            Creature* summon = me->GetMap()->GetCreature(id);
+            if (summon && summon->GetEntry() == NPC_ZOMBIE && summon->IsAlive())
+            {
+                summon->SetWalk(true);
+                summon->SetHealth(summon->GetMaxHealth() * 0.05);
+                AttackGluth(summon);
+            }
+        }
+
+        void EatZombie(Unit* who)
+        {
+            if (who->GetEntry() == NPC_ZOMBIE)
+            {
+                if (me->IsWithinDist(who, 10.0f, true))
+                {
+                    me->SetFacingToObject(who);
+                    me->GetMotionMaster()->MoveChase(who);
+                    me->Kill(who);
+                    me->ModifyHealth(int32(me->CountPctFromMaxHealth(5)));
+                    me->Attack(me->GetVictim(), true);
+                    me->GetMotionMaster()->MoveChase(me->GetVictim());
+                }
+            }
         }
 
         void EnterCombat(Unit* /*who*/) override
@@ -86,15 +131,20 @@ public:
             _EnterCombat();
             events.ScheduleEvent(EVENT_WOUND, 10000);
             events.ScheduleEvent(EVENT_ENRAGE, 15000);
-            events.ScheduleEvent(EVENT_DECIMATE, 105000);
-            events.ScheduleEvent(EVENT_BERSERK, 8*60000);
+            events.ScheduleEvent(EVENT_DECIMATE, 104000);
+            events.ScheduleEvent(EVENT_BERSERK, 7*60000);
             events.ScheduleEvent(EVENT_SUMMON, 15000);
+            events.ScheduleEvent(EVENT_EATEN, 1000);
         }
 
         void JustSummoned(Creature* summon) override
         {
             if (summon->GetEntry() == NPC_ZOMBIE)
-                summon->AI()->AttackStart(me);
+            {
+                if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 0, 100, true))
+                    summon->AI()->AttackStart(target);
+                summon->AddAura(SPELL_INFECTED_AURA, summon);
+            }
             summons.Summon(summon);
         }
 
@@ -114,14 +164,16 @@ public:
                         events.ScheduleEvent(EVENT_WOUND, 10000);
                         break;
                     case EVENT_ENRAGE:
-                        /// @todo Add missing text
+                        me->TextEmote(EMOTE_ENRAGE, nullptr, true);
                         DoCast(me, SPELL_ENRAGE);
                         events.ScheduleEvent(EVENT_ENRAGE, 15000);
                         break;
                     case EVENT_DECIMATE:
-                        /// @todo Add missing text
+                        me->TextEmote(EMOTE_DECIMATE, nullptr, true);
                         DoCastAOE(SPELL_DECIMATE);
-                        events.ScheduleEvent(EVENT_DECIMATE, 105000);
+                        for (SummonList::iterator itr = summons.begin(); itr != summons.end(); ++itr)
+                            AttackGluthDec(*itr);
+                        events.ScheduleEvent(EVENT_DECIMATE, 110000);
                         break;
                     case EVENT_BERSERK:
                         DoCast(me, SPELL_BERSERK);
@@ -132,10 +184,15 @@ public:
                             DoSummon(NPC_ZOMBIE, PosSummon[rand32() % RAID_MODE(1, 3)]);
                         events.ScheduleEvent(EVENT_SUMMON, 10000);
                         break;
+                    case EVENT_EATEN:
+                        if (Creature* zombie = me->FindNearestCreature(NPC_ZOMBIE, 7.0f))
+                            EatZombie(zombie);
+                        events.ScheduleEvent(EVENT_EATEN, 1000);
+                        break;                   
                 }
             }
 
-            if (me->GetVictim() && me->EnsureVictim()->GetEntry() == NPC_ZOMBIE)
+            /*if (me->GetVictim() && me->EnsureVictim()->GetEntry() == NPC_ZOMBIE)
             {
                 if (me->IsWithinMeleeRange(me->GetVictim()))
                 {
@@ -143,8 +200,8 @@ public:
                     me->ModifyHealth(int32(me->CountPctFromMaxHealth(5)));
                 }
             }
-            else
-                DoMeleeAttackIfReady();
+            else*/
+            DoMeleeAttackIfReady();
         }
     };
 

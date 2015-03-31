@@ -3672,7 +3672,7 @@ void Spell::EffectScriptEffect(SpellEffIndex effIndex)
                 // Decimate
                 case 28374:
                 case 54426:
-                    if (unitTarget)
+                    if (unitTarget && unitTarget != m_caster)
                     {
                         int32 damage = int32(unitTarget->GetHealth()) - int32(unitTarget->CountPctFromMaxHealth(5));
                         if (damage > 0)
